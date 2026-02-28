@@ -1,0 +1,9 @@
+{
+  "name": "p2p-share",
+  "version": "1.0.0",
+  "description": "P2P file sharing with persistent peer tiles, online indicators, and permission-based transfers",
+  "scripts": {
+    "start": "cd server && node index.js",
+    "install-deps": "cd server && npm install"
+  }
+}

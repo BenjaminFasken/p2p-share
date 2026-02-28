@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+  <title>P2P Share — Instant File Sharing</title>
+  <meta name="description" content="Share files directly between browsers. No upload, no cloud, peer-to-peer.">
+  <meta name="theme-color" content="#1a1a2e">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+  <!-- ─── Header ─────────────────────────────────────────────────────── -->
+  <header id="header">
+    <div class="header-left">
+      <svg class="logo-icon" viewBox="0 0 24 24" width="32" height="32"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
+      <span class="header-title">P2P Share</span>
+    </div>
+    <div class="header-right">
+      <div class="my-name-wrapper">
+        <label for="myName" class="sr-only">Your name</label>
+        <input type="text" id="myName" class="name-input" placeholder="Your device name" maxlength="30">
+      </div>
+      <div class="connection-badge" id="connectionBadge" title="Disconnected">
+        <span class="dot offline"></span>
+        <span class="badge-text">Offline</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ─── Main content ───────────────────────────────────────────────── -->
+  <main>
+    <!-- Start screen: peer tiles -->
+    <section id="startScreen" class="screen active">
+      <div class="section-header">
+        <h2>Your Devices</h2>
+        <p class="subtitle">Previously connected browsers appear here. Green = online now.</p>
+      </div>
+      <div id="peerGrid" class="peer-grid">
+        <!-- tiles inserted by JS -->
+        <div class="peer-tile add-tile" id="addPeerTile" title="Share your link to connect a new device">
+          <div class="tile-icon">
+            <svg viewBox="0 0 24 24" width="48" height="48"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+          </div>
+          <span class="tile-label">Connect New Device</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Transfer screen (hidden until a peer is selected) -->
+    <section id="transferScreen" class="screen">
+      <button class="btn-back" id="btnBack">← Back</button>
+
+      <div class="transfer-header">
+        <div class="peer-avatar-lg" id="peerAvatarLg"></div>
+        <h2 id="peerNameLg">Peer</h2>
+        <span class="peer-status" id="peerStatusLg">offline</span>
+      </div>
+
+      <div class="transfer-body">
+        <!-- Send section -->
+        <div class="send-section">
+          <div class="drop-zone" id="dropZone">
+            <svg viewBox="0 0 24 24" width="48" height="48"><path fill="currentColor" d="M19.35 10.04A7.49 7.49 0 0012 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 000 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
+            <p>Drag files here or <button class="link-btn" id="btnBrowse">browse</button></p>
+            <input type="file" id="fileInput" multiple hidden>
+          </div>
+          <div id="selectedFiles" class="selected-files" hidden></div>
+          <button class="btn-primary" id="btnSend" disabled>Send Files</button>
+        </div>
+
+        <!-- Progress section -->
+        <div class="progress-section" id="progressSection" hidden>
+          <h3 id="transferTitle">Sending…</h3>
+          <div class="progress-bar-bg">
+            <div class="progress-bar" id="progressBar"></div>
+          </div>
+          <span class="progress-text" id="progressText">0%</span>
+          <span class="speed-text" id="speedText"></span>
+        </div>
+
+        <!-- Incoming file request -->
+        <div class="incoming-section" id="incomingSection" hidden>
+          <h3>Incoming File Request</h3>
+          <div id="incomingFiles" class="incoming-files"></div>
+          <div class="incoming-actions">
+            <button class="btn-primary" id="btnAccept">Accept</button>
+            <button class="btn-secondary" id="btnReject">Reject</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Connection link modal -->
+    <div class="modal-overlay" id="modalOverlay" hidden>
+      <div class="modal">
+        <button class="modal-close" id="modalClose">&times;</button>
+        <h3>Connect a New Device</h3>
+        <p>Open this link on the other device, or scan the QR code:</p>
+        <div class="link-box">
+          <input type="text" id="connectLink" readonly>
+          <button class="btn-copy" id="btnCopyLink">Copy</button>
+        </div>
+        <div id="qrCode" class="qr-code"></div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Toast notifications -->
+  <div id="toasts" class="toasts"></div>
+
+  <!-- ─── Scripts ────────────────────────────────────────────────────── -->
+  <script src="/js/storage.js"></script>
+  <script src="/js/signaling.js"></script>
+  <script src="/js/peer.js"></script>
+  <script src="/js/file-transfer.js"></script>
+  <script src="/js/ui.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>
