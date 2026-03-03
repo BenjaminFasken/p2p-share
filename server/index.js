@@ -156,6 +156,7 @@ wss.on('connection', (ws) => {
           from: peerId,
           fromName: sender ? sender.name : 'Unknown',
           files: msg.files,
+          folderName: msg.folderName || null,
         });
         break;
       }
@@ -167,6 +168,20 @@ wss.on('connection', (ws) => {
           type: 'file-accept',
           from: peerId,
           accepted: msg.accepted,
+        });
+        break;
+      }
+
+      // ── Text message relay ──────────────────────────────────────────────
+      case 'text-message': {
+        if (!peerId || !msg.to) return;
+        const tmSender = clients.get(peerId);
+        sendTo(msg.to, {
+          type: 'text-message',
+          from: peerId,
+          fromName: tmSender ? tmSender.name : 'Unknown',
+          text: msg.text,
+          msgId: msg.msgId,
         });
         break;
       }

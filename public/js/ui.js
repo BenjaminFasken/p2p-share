@@ -1,5 +1,5 @@
 /**
- * ui.js – DOM manipulation helpers and UI state.
+ * ui.js – DOM manipulation helpers and UI state (Chat edition).
  */
 const UI = (() => {
   // ─── element refs ──────────────────────────────────────────────────────
@@ -11,16 +11,24 @@ const UI = (() => {
   const connectionBadge = $('#connectionBadge');
   const myNameInput     = $('#myName');
 
-  // Transfer screen
+  // Chat screen
   const btnBack         = $('#btnBack');
   const peerAvatarLg    = $('#peerAvatarLg');
   const peerNameLg      = $('#peerNameLg');
   const peerStatusLg    = $('#peerStatusLg');
-  const dropZone        = $('#dropZone');
+  const btnClearChat    = $('#btnClearChat');
+  const chatMessages    = $('#chatMessages');
+  const chatEmpty       = $('#chatEmpty');
+  const chatInput       = $('#chatInput');
+  const btnSendMsg      = $('#btnSendMsg');
+  const btnAttach       = $('#btnAttach');
+  const btnFolder       = $('#btnFolder');
   const fileInput       = $('#fileInput');
-  const btnBrowse       = $('#btnBrowse');
-  const selectedFilesCt = $('#selectedFiles');
-  const btnSend         = $('#btnSend');
+  const folderInput     = $('#folderInput');
+  const chatInputArea   = $('#chatInputArea');
+  const chatDropOverlay = $('#chatDropOverlay');
+
+  // Progress
   const progressSection = $('#progressSection');
   const progressBar     = $('#progressBar');
   const progressText    = $('#progressText');
@@ -29,7 +37,8 @@ const UI = (() => {
 
   // Incoming
   const incomingSection = $('#incomingSection');
-  const incomingFiles   = $('#incomingFiles');
+  const incomingText    = $('#incomingText');
+  const incomingFileList = $('#incomingFileList');
   const btnAccept       = $('#btnAccept');
   const btnReject       = $('#btnReject');
 
@@ -43,7 +52,8 @@ const UI = (() => {
 
   // ─── helpers ───────────────────────────────────────────────────────────
   function initials(name) {
-    return (name || '??').split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
+    if (!name) return '??';
+    return name.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
   }
 
   function humanSize(bytes) {
@@ -56,9 +66,42 @@ const UI = (() => {
 
   function avatarColor(id) {
     const colors = ['#e94560','#0d7377','#14a76c','#ff6b6b','#6c5ce7','#e17055','#00b894','#fdcb6e','#636e72','#d63031'];
+    if (!id) return colors[0];
     let h = 0;
     for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) & 0xffffffff;
     return colors[Math.abs(h) % colors.length];
+  }
+
+  function _formatTime(ts) {
+    const d = new Date(ts);
+    const h = d.getHours().toString().padStart(2, '0');
+    const m = d.getMinutes().toString().padStart(2, '0');
+    return `${h}:${m}`;
+  }
+
+  function _formatDate(ts) {
+    const d = new Date(ts);
+    const today = new Date();
+    if (d.toDateString() === today.toDateString()) return 'Today';
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+
+  function _esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  function _timeAgo(ts) {
+    if (!ts) return 'never';
+    const diff = Date.now() - ts;
+    if (diff < 60000) return 'just now';
+    if (diff < 3600000) return Math.round(diff/60000) + 'm ago';
+    if (diff < 86400000) return Math.round(diff/3600000) + 'h ago';
+    return Math.round(diff/86400000) + 'd ago';
   }
 
   // ─── public API ────────────────────────────────────────────────────────
@@ -72,13 +115,9 @@ const UI = (() => {
   }
 
   /**
-   * Render peer tiles.
-   * @param {Array<{peerId, name, online}>} peers
-   * @param {function} onSelect  – called with peerId when tile is clicked
-   * @param {function} onRemove  – called with peerId when × is clicked
+   * Render peer tiles (home screen).
    */
   function renderPeerTiles(peers, onSelect, onRemove) {
-    // Remove existing tiles (except add-tile)
     peerGrid.querySelectorAll('.peer-tile:not(.add-tile)').forEach(el => el.remove());
 
     peers.forEach(p => {
@@ -109,7 +148,6 @@ const UI = (() => {
     });
   }
 
-  /** Update a single tile's online status without full re-render */
   function updateTileStatus(peerId, online, name) {
     const tile = peerGrid.querySelector(`.peer-tile[data-peer-id="${peerId}"]`);
     if (!tile) return;
@@ -121,7 +159,6 @@ const UI = (() => {
       const lbl = tile.querySelector('.tile-label');
       if (lbl) lbl.textContent = name;
       const av = tile.querySelector('.tile-avatar');
-      // Update initials (only text node)
       if (av) {
         const statusEl = av.querySelector('.tile-status');
         av.textContent = '';
@@ -137,39 +174,144 @@ const UI = (() => {
     transferScreen.classList.remove('active');
   }
 
-  function showTransferScreen(peerInfo) {
+  /**
+   * Show the chat screen for a peer with their history.
+   * @param {Object} peerInfo  { peerId, name, online }
+   * @param {Array}  history   Array of chat messages
+   * @param {string} myId      Own peer ID
+   */
+  function showChatScreen(peerInfo, history, myId) {
     startScreen.classList.remove('active');
     transferScreen.classList.add('active');
+
     peerAvatarLg.textContent = initials(peerInfo.name);
     peerAvatarLg.style.background = avatarColor(peerInfo.peerId);
     peerNameLg.textContent = peerInfo.name;
     peerStatusLg.textContent = peerInfo.online ? 'online' : 'offline';
     peerStatusLg.className = 'peer-status ' + (peerInfo.online ? 'online' : 'offline');
 
-    // Reset transfer UI
-    selectedFilesCt.hidden = true;
-    selectedFilesCt.innerHTML = '';
-    btnSend.disabled = true;
+    // Reset state
     progressSection.hidden = true;
     incomingSection.hidden = true;
+    chatInput.value = '';
+
+    // Render history
+    _renderChatHistory(history, myId);
+
+    // Focus input
+    setTimeout(() => chatInput.focus(), 100);
   }
 
-  function updateTransferPeerStatus(online) {
+  function _renderChatHistory(history, myId) {
+    // Clear all but keep chatEmpty
+    chatMessages.querySelectorAll('.chat-msg, .chat-date-sep').forEach(el => el.remove());
+
+    if (!history || history.length === 0) {
+      chatEmpty.style.display = '';
+      return;
+    }
+    chatEmpty.style.display = 'none';
+
+    let lastDate = '';
+    history.forEach(msg => {
+      const dateStr = _formatDate(msg.timestamp);
+      if (dateStr !== lastDate) {
+        lastDate = dateStr;
+        const sep = document.createElement('div');
+        sep.className = 'chat-date-sep';
+        sep.innerHTML = `<span>${dateStr}</span>`;
+        chatMessages.appendChild(sep);
+      }
+      _appendMessageEl(msg, msg.from === myId);
+    });
+
+    _scrollChat();
+  }
+
+  function _appendMessageEl(msg, isMe) {
+    const el = document.createElement('div');
+    const side = isMe ? 'sent' : 'received';
+
+    if (msg.type === 'text') {
+      el.className = `chat-msg ${side}`;
+      el.innerHTML = `
+        <span class="msg-text">${_esc(msg.text)}</span>
+        <span class="msg-time">${_formatTime(msg.timestamp)}</span>
+      `;
+    } else if (msg.type === 'files') {
+      // Files/folder message
+      const files = msg.files || [];
+      const isFolder = msg.folderName;
+
+      if (isFolder) {
+        el.className = `chat-msg ${side} file-msg folder-bubble`;
+        el.innerHTML = `
+          <div class="folder-bubble-header">
+            <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
+            <span class="folder-bubble-name">${_esc(msg.folderName)}</span>
+          </div>
+          <span class="folder-bubble-count">${files.length} file${files.length !== 1 ? 's' : ''} · ${humanSize(files.reduce((s,f) => s + (f.size||0), 0))}</span>
+          <span class="msg-time">${_formatTime(msg.timestamp)}</span>
+        `;
+      } else if (files.length === 1) {
+        const f = files[0];
+        el.className = `chat-msg ${side} file-msg`;
+        el.innerHTML = `
+          <div class="file-bubble">
+            <div class="file-bubble-icon">
+              <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
+            </div>
+            <div class="file-bubble-info">
+              <span class="file-bubble-name">${_esc(f.name)}</span>
+              <span class="file-bubble-meta">${humanSize(f.size)}</span>
+              ${f.relativePath ? `<span class="file-bubble-path">${_esc(f.relativePath)}</span>` : ''}
+            </div>
+          </div>
+          <span class="msg-time">${_formatTime(msg.timestamp)}</span>
+        `;
+      } else {
+        el.className = `chat-msg ${side} file-msg`;
+        let filesHtml = files.slice(0, 5).map(f =>
+          `<span class="file-bubble-name" style="font-size:.78rem">${_esc(f.name)} (${humanSize(f.size)})</span>`
+        ).join('');
+        if (files.length > 5) filesHtml += `<span class="file-bubble-meta">+${files.length - 5} more</span>`;
+        el.innerHTML = `
+          <div class="file-bubble">
+            <div class="file-bubble-icon">
+              <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
+            </div>
+            <div class="file-bubble-info">
+              ${filesHtml}
+            </div>
+          </div>
+          <span class="msg-time">${_formatTime(msg.timestamp)}</span>
+        `;
+      }
+    }
+
+    chatMessages.appendChild(el);
+    return el;
+  }
+
+  /**
+   * Append a single new message to the chat and scroll.
+   */
+  function appendChatMessage(msg, isMe) {
+    chatEmpty.style.display = 'none';
+    _appendMessageEl(msg, isMe);
+    _scrollChat();
+  }
+
+  function _scrollChat() {
+    requestAnimationFrame(() => {
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+    });
+  }
+
+  function updateTransferPeerStatus(online, name) {
     peerStatusLg.textContent = online ? 'online' : 'offline';
     peerStatusLg.className = 'peer-status ' + (online ? 'online' : 'offline');
-  }
-
-  // ─── selected files list ──────────────────────────────────────────────
-  function showSelectedFiles(files) {
-    selectedFilesCt.hidden = false;
-    selectedFilesCt.innerHTML = '';
-    files.forEach((f, i) => {
-      const div = document.createElement('div');
-      div.className = 'selected-file';
-      div.innerHTML = `<span class="sf-name">${_esc(f.name)}</span><span class="sf-size">${humanSize(f.size)}</span><button class="sf-remove" data-idx="${i}">&times;</button>`;
-      selectedFilesCt.appendChild(div);
-    });
-    btnSend.disabled = files.length === 0;
+    if (name) peerNameLg.textContent = name;
   }
 
   // ─── progress ──────────────────────────────────────────────────────────
@@ -194,14 +336,21 @@ const UI = (() => {
   // ─── incoming offer ───────────────────────────────────────────────────
   function showIncomingOffer(fromName, files, onAccept, onReject) {
     incomingSection.hidden = false;
-    incomingFiles.innerHTML = '';
-    files.forEach(f => {
+    const totalSize = files.reduce((s, f) => s + (f.size || 0), 0);
+    incomingText.textContent = `${fromName} wants to send ${files.length} file${files.length !== 1 ? 's' : ''} (${humanSize(totalSize)})`;
+
+    incomingFileList.innerHTML = '';
+    files.slice(0, 10).forEach(f => {
       const div = document.createElement('div');
-      div.className = 'incoming-file';
       div.innerHTML = `<span>${_esc(f.name)}</span><span>${humanSize(f.size)}</span>`;
-      incomingFiles.appendChild(div);
+      incomingFileList.appendChild(div);
     });
-    // Bind once
+    if (files.length > 10) {
+      const more = document.createElement('div');
+      more.textContent = `+${files.length - 10} more files`;
+      incomingFileList.appendChild(more);
+    }
+
     btnAccept.onclick = () => { incomingSection.hidden = true; onAccept(); };
     btnReject.onclick = () => { incomingSection.hidden = true; onReject(); };
   }
@@ -227,34 +376,20 @@ const UI = (() => {
     setTimeout(() => { el.remove(); }, 4000);
   }
 
-  // ─── util ──────────────────────────────────────────────────────────────
-  function _esc(s) {
-    const d = document.createElement('div');
-    d.textContent = s;
-    return d.innerHTML;
-  }
-
-  function _timeAgo(ts) {
-    if (!ts) return 'never';
-    const diff = Date.now() - ts;
-    if (diff < 60000) return 'just now';
-    if (diff < 3600000) return Math.round(diff/60000) + 'm ago';
-    if (diff < 86400000) return Math.round(diff/3600000) + 'h ago';
-    return Math.round(diff/86400000) + 'd ago';
-  }
-
   return {
     setConnectionStatus, renderPeerTiles, updateTileStatus,
-    showStartScreen, showTransferScreen, updateTransferPeerStatus,
-    showSelectedFiles, showProgress, updateProgress, hideProgress,
+    showStartScreen, showChatScreen, updateTransferPeerStatus,
+    appendChatMessage,
+    showProgress, updateProgress, hideProgress,
     showIncomingOffer, hideIncoming,
     showModal, hideModal,
     toast, humanSize, initials,
-    // Element access for event binding in app.js
     el: {
-      myNameInput, addPeerTile, btnBack, dropZone, fileInput,
-      btnBrowse, btnSend, modalOverlay, modalClose, connectLink,
-      btnCopyLink, selectedFilesCt,
+      myNameInput, addPeerTile, btnBack, chatInput, btnSendMsg,
+      btnAttach, btnFolder, fileInput, folderInput,
+      chatInputArea, chatDropOverlay, chatMessages,
+      btnClearChat,
+      modalOverlay, modalClose, connectLink, btnCopyLink,
     },
   };
 })();

@@ -32,8 +32,11 @@ const PeerStorage = (() => {
 
   /** Return an array of { peerId, name, lastSeen } */
   function getKnownPeers() {
-    try { return JSON.parse(localStorage.getItem(KEY_PEERS)) || []; }
-    catch { return []; }
+    try {
+      const raw = JSON.parse(localStorage.getItem(KEY_PEERS)) || [];
+      // Filter out any corrupt entries missing peerId
+      return raw.filter(p => p && p.peerId);
+    } catch { return []; }
   }
 
   function _savePeers(peers) {
@@ -42,6 +45,7 @@ const PeerStorage = (() => {
 
   /** Add or update a known peer */
   function upsertPeer(peerId, name) {
+    if (!peerId) return;
     const peers = getKnownPeers();
     const idx = peers.findIndex(p => p.peerId === peerId);
     const entry = { peerId, name: name || 'Unknown', lastSeen: Date.now() };
@@ -58,5 +62,25 @@ const PeerStorage = (() => {
     _savePeers(peers);
   }
 
-  return { getMyId, getMyName, setMyName, getKnownPeers, upsertPeer, removePeer };
+  // ── Chat history ─────────────────────────────────────────────────────
+  function getChatHistory(peerId) {
+    try { return JSON.parse(localStorage.getItem('p2p_chat_' + peerId)) || []; }
+    catch { return []; }
+  }
+
+  function addChatMessage(peerId, message) {
+    const history = getChatHistory(peerId);
+    history.push(message);
+    // Keep last 1000 messages
+    if (history.length > 1000) history.splice(0, history.length - 1000);
+    localStorage.setItem('p2p_chat_' + peerId, JSON.stringify(history));
+    return message;
+  }
+
+  function clearChatHistory(peerId) {
+    localStorage.removeItem('p2p_chat_' + peerId);
+  }
+
+  return { getMyId, getMyName, setMyName, getKnownPeers, upsertPeer, removePeer,
+           getChatHistory, addChatMessage, clearChatHistory };
 })();

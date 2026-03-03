@@ -41,6 +41,7 @@ class FileTransfer {
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
+      const relativePath = file.webkitRelativePath || '';
       // Announce file start
       dc.send(JSON.stringify({
         cmd: 'file-start',
@@ -49,6 +50,7 @@ class FileTransfer {
         type: file.type,
         fileIndex: i,
         totalFiles: files.length,
+        relativePath: relativePath,
       }));
 
       // Read and send chunks
@@ -100,18 +102,39 @@ class FileTransfer {
    * Send a single chunk, pausing if the buffer is full.
    */
   _sendChunk(dc, buffer) {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
+      if (dc.readyState !== 'open') {
+        reject(new Error('DataChannel not open'));
+        return;
+      }
       const LOW_WATER = 256 * 1024;
       if (dc.bufferedAmount > LOW_WATER) {
-        const check = () => {
-          if (dc.bufferedAmount <= LOW_WATER) {
-            dc.removeEventListener('bufferedamountlow', check);
-            dc.send(buffer);
-            resolve();
-          }
-        };
         dc.bufferedAmountLowThreshold = LOW_WATER;
+        let resolved = false;
+
+        const done = () => {
+          if (resolved) return;
+          resolved = true;
+          dc.removeEventListener('bufferedamountlow', check);
+          clearInterval(poll);
+          dc.send(buffer);
+          resolve();
+        };
+
+        const check = () => {
+          if (dc.readyState !== 'open') {
+            resolved = true;
+            dc.removeEventListener('bufferedamountlow', check);
+            clearInterval(poll);
+            reject(new Error('DataChannel closed during transfer'));
+            return;
+          }
+          if (dc.bufferedAmount <= LOW_WATER) done();
+        };
+
         dc.addEventListener('bufferedamountlow', check);
+        // Polling fallback in case the event doesn't fire
+        const poll = setInterval(check, 100);
       } else {
         dc.send(buffer);
         resolve();
@@ -139,6 +162,7 @@ class ReceiveSession {
     this._currentFile = null;
     this._chunks = [];
     this._received = 0;
+    this._totalReceived = 0;
     this._totalBytes = 0;
     this._filesCompleted = [];
   }
@@ -149,7 +173,11 @@ class ReceiveSession {
       const msg = JSON.parse(data);
       switch (msg.cmd) {
         case 'file-start':
-          this._currentFile = { name: msg.name, size: msg.size, type: msg.type, index: msg.fileIndex, totalFiles: msg.totalFiles };
+          this._currentFile = {
+            name: msg.name, size: msg.size, type: msg.type,
+            index: msg.fileIndex, totalFiles: msg.totalFiles,
+            relativePath: msg.relativePath || '',
+          };
           this._totalBytes += msg.size;
           this._chunks = [];
           this._received = 0;
@@ -165,9 +193,10 @@ class ReceiveSession {
       // Binary chunk
       this._chunks.push(data);
       this._received += data.byteLength;
+      this._totalReceived += data.byteLength;
       this._ft._emit('receive-progress', {
-        receivedBytes: this._received,
-        totalBytes: this._currentFile ? this._currentFile.size : 0,
+        receivedBytes: this._totalReceived,
+        totalBytes: this._totalBytes,
         fileName: this._currentFile ? this._currentFile.name : '',
       });
     }
@@ -187,7 +216,11 @@ class ReceiveSession {
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 60000);
 
-    this._filesCompleted.push({ name: this._currentFile.name, size: this._currentFile.size });
+    this._filesCompleted.push({
+      name: this._currentFile.name,
+      size: this._currentFile.size,
+      relativePath: this._currentFile.relativePath,
+    });
     this._currentFile = null;
     this._chunks = [];
     this._received = 0;

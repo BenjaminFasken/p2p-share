@@ -96,8 +96,28 @@ class PeerManager {
 
   /** Initiate a connection and create a data channel to a remote peer */
   async connect(remotePeerId) {
+    // Cleanup stale / failed connections
+    const existing = this._peers.get(remotePeerId);
+    if (existing) {
+      const state = existing.pc.connectionState || existing.pc.iceConnectionState;
+      if (state === 'failed' || state === 'closed' || state === 'disconnected') {
+        console.log('[WebRTC] Cleaning up stale connection to', remotePeerId, '(state:', state + ')');
+        this._cleanup(remotePeerId);
+      }
+    }
+
     const entry = this._getOrCreate(remotePeerId);
     if (entry.dc && entry.dc.readyState === 'open') return entry.dc;
+
+    // If there's a DC still connecting, wait for it
+    if (entry.dc && entry.dc.readyState === 'connecting') {
+      console.log('[WebRTC] DC connecting, waiting…');
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('DataChannel open timeout')), 15000);
+        entry.dc.addEventListener('open', () => { clearTimeout(timeout); resolve(entry.dc); }, { once: true });
+        entry.dc.addEventListener('error', (e) => { clearTimeout(timeout); reject(e); }, { once: true });
+      });
+    }
 
     // Create data channel (initiator side)
     const dc = entry.pc.createDataChannel('file-transfer', {
@@ -111,6 +131,7 @@ class PeerManager {
     try {
       const offer = await entry.pc.createOffer();
       await entry.pc.setLocalDescription(offer);
+      console.log('[WebRTC] Sending offer to', remotePeerId);
       this._sig.sendSignal(remotePeerId, { type: 'offer', sdp: entry.pc.localDescription });
     } finally {
       entry.makingOffer = false;
@@ -131,17 +152,21 @@ class PeerManager {
         const polite = this._myId < from; // deterministic: lower ID is polite
         const offerCollision = entry.makingOffer || pc.signalingState !== 'stable';
 
+        console.log('[WebRTC] Received offer from', from, '| polite:', polite, '| collision:', offerCollision);
+
         if (offerCollision && !polite) {
-          // Impolite peer ignores the incoming offer
+          console.log('[WebRTC] Ignoring offer (impolite, collision)');
           return;
         }
 
         await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
+        console.log('[WebRTC] Sending answer to', from);
         this._sig.sendSignal(from, { type: 'answer', sdp: pc.localDescription });
 
       } else if (payload.type === 'answer') {
+        console.log('[WebRTC] Received answer from', from);
         await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
 
       } else if (payload.type === 'ice-candidate') {

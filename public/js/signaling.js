@@ -94,8 +94,8 @@ class SignalingClient {
     this._send({ type: 'signal', to, payload });
   }
 
-  sendFileOffer(to, files) {
-    this._send({ type: 'file-offer', to, files });
+  sendFileOffer(to, files, folderName) {
+    this._send({ type: 'file-offer', to, files, folderName: folderName || null });
   }
 
   sendFileAccept(to, accepted) {
@@ -109,6 +109,10 @@ class SignalingClient {
 
   sendPairRequest(to) {
     this._send({ type: 'pair-request', to });
+  }
+
+  sendTextMessage(to, text, msgId) {
+    this._send({ type: 'text-message', to, text, msgId });
   }
 
   get connected() {

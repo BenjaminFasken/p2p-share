@@ -1,5 +1,5 @@
 /**
- * app.js – Main orchestrator.
+ * app.js – Main orchestrator (Chat edition).
  *
  * Ties together: PeerStorage, SignalingClient, PeerManager,
  * FileTransfer, and UI.
@@ -8,9 +8,7 @@
   'use strict';
 
   // ── Configuration ──────────────────────────────────────────────────────
-  // If the page is loaded over HTTPS the WS must be wss.
   const WS_URL = (() => {
-    // When served from the same host as the signaling server:
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     return `${proto}://${location.host}/ws`;
   })();
@@ -27,6 +25,10 @@
     return adj[Math.random()*adj.length|0] + ' ' + noun[Math.random()*noun.length|0];
   }
 
+  function _uid() {
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  }
+
   // ── Online tracking ────────────────────────────────────────────────────
   /** peerId → { name, online } */
   const onlinePeers = new Map();
@@ -37,10 +39,12 @@
   const fileTransfer = new FileTransfer();
 
   // ── State ──────────────────────────────────────────────────────────────
-  let currentPeerId = null;     // The peer we're viewing in transfer screen
-  let selectedFiles  = [];       // File[] selected for sending
-  let receiveSession = null;     // Active ReceiveSession
-  let sendStartTime  = 0;
+  let currentPeerId  = null;      // The peer we're chatting with
+  let selectedFiles   = [];        // File[] selected for sending
+  let folderName      = null;      // Non-null if sending a folder
+  let receiveSession  = null;      // Active ReceiveSession
+  let sendStartTime   = 0;
+  let pendingFileOffer = null;     // { from, files, folderName } for incoming
 
   // ── Check for ?connect=<peerId> in URL ─────────────────────────────────
   const urlParams = new URLSearchParams(location.search);
@@ -57,7 +61,6 @@
 
   signaling.on('registered', () => {
     UI.setConnectionStatus(true);
-    // If we arrived here via a connect link, add that peer and request mutual pairing
     if (connectTo && connectTo !== myId) {
       PeerStorage.upsertPeer(connectTo, 'New Device');
       signaling.sendPairRequest(connectTo);
@@ -68,7 +71,6 @@
   signaling.on('peers-list', (msg) => {
     msg.peers.forEach(p => {
       onlinePeers.set(p.peerId, { name: p.name, online: true });
-      // Auto-save any peer we see that we're supposed to connect to
       if (p.peerId === connectTo) {
         PeerStorage.upsertPeer(p.peerId, p.name);
       }
@@ -82,22 +84,19 @@
       onlinePeers.delete(msg.peerId);
     }
 
-    // If this peer is known, update their name
     const known = PeerStorage.getKnownPeers().find(p => p.peerId === msg.peerId);
     if (known) {
       PeerStorage.upsertPeer(msg.peerId, msg.name);
     }
 
-    // Update tile
     UI.updateTileStatus(msg.peerId, msg.online, msg.name);
 
-    // Update transfer screen if we're viewing this peer
     if (msg.peerId === currentPeerId) {
-      UI.updateTransferPeerStatus(msg.online);
+      UI.updateTransferPeerStatus(msg.online, msg.name);
     }
   });
 
-  // ── Pair request (mutual discovery) ────────────────────────────────────
+  // ── Pair request ───────────────────────────────────────────────────────
   signaling.on('pair-request', (msg) => {
     const { from, fromName } = msg;
     PeerStorage.upsertPeer(from, fromName);
@@ -105,28 +104,53 @@
     UI.toast(`${fromName} paired with you!`, 'success');
   });
 
+  // ── Text messages ──────────────────────────────────────────────────────
+  signaling.on('text-message', (msg) => {
+    const { from, fromName, text, msgId } = msg;
+    PeerStorage.upsertPeer(from, fromName);
+    refreshTiles();
+
+    const chatMsg = {
+      id: msgId || _uid(),
+      type: 'text',
+      from: from,
+      text: text,
+      timestamp: Date.now(),
+    };
+    PeerStorage.addChatMessage(from, chatMsg);
+
+    // If currently chatting with this peer, show it
+    if (currentPeerId === from) {
+      UI.appendChatMessage(chatMsg, false);
+    } else {
+      UI.toast(`${fromName}: ${text.length > 40 ? text.slice(0, 40) + '…' : text}`, 'success');
+    }
+  });
+
   // ── File offer / accept via signaling ──────────────────────────────────
   signaling.on('file-offer', (msg) => {
     const { from, fromName, files } = msg;
-    // Save peer
     PeerStorage.upsertPeer(from, fromName);
     refreshTiles();
 
     // If we're not viewing this peer, switch to them
     if (currentPeerId !== from) {
-      openTransferScreen(from);
+      openChatScreen(from);
     }
+
+    pendingFileOffer = { from, files, folderName: msg.folderName || null };
 
     UI.showIncomingOffer(fromName, files,
       // accept
       () => {
         signaling.sendFileAccept(from, true);
         receiveSession = fileTransfer.createReceiver();
-        UI.showProgress('Waiting for sender…');
+        UI.showProgress('Waiting for data…');
       },
       // reject
       () => {
         signaling.sendFileAccept(from, false);
+        pendingFileOffer = null;
       }
     );
   });
@@ -137,7 +161,6 @@
       UI.hideProgress();
       return;
     }
-    // Accepted! Establish WebRTC and send the files
     _startSending(msg.from);
   });
 
@@ -162,8 +185,29 @@
 
   fileTransfer.on('send-complete', () => {
     UI.updateProgress(100);
-    UI.toast('Files sent successfully!', 'success');
-    setTimeout(() => UI.hideProgress(), 2000);
+
+    // Record in chat history
+    const chatMsg = {
+      id: _uid(),
+      type: 'files',
+      from: myId,
+      files: selectedFiles.map(f => ({
+        name: f.name,
+        size: f.size,
+        relativePath: f.webkitRelativePath || '',
+      })),
+      folderName: folderName,
+      timestamp: Date.now(),
+    };
+    if (currentPeerId) {
+      PeerStorage.addChatMessage(currentPeerId, chatMsg);
+      UI.appendChatMessage(chatMsg, true);
+    }
+
+    UI.toast('Files sent!', 'success');
+    setTimeout(() => UI.hideProgress(), 1500);
+    selectedFiles = [];
+    folderName = null;
   });
 
   fileTransfer.on('receive-progress', ({ receivedBytes, totalBytes }) => {
@@ -173,9 +217,33 @@
 
   fileTransfer.on('receive-complete', (files) => {
     UI.updateProgress(100);
+
+    // Record in chat history
+    const from = pendingFileOffer ? pendingFileOffer.from : currentPeerId;
+    const chatMsg = {
+      id: _uid(),
+      type: 'files',
+      from: from || 'unknown',
+      files: files.map(f => ({
+        name: f.name,
+        size: f.size,
+        relativePath: f.relativePath || '',
+      })),
+      folderName: pendingFileOffer ? pendingFileOffer.folderName : null,
+      timestamp: Date.now(),
+    };
+    const chatPeerId = from || currentPeerId;
+    if (chatPeerId) {
+      PeerStorage.addChatMessage(chatPeerId, chatMsg);
+      if (currentPeerId === chatPeerId) {
+        UI.appendChatMessage(chatMsg, false);
+      }
+    }
+
     UI.toast(`Received ${files.length} file(s)!`, 'success');
-    setTimeout(() => UI.hideProgress(), 2000);
+    setTimeout(() => UI.hideProgress(), 1500);
     receiveSession = null;
+    pendingFileOffer = null;
   });
 
   // ── Send logic ─────────────────────────────────────────────────────────
@@ -212,22 +280,22 @@
         online: !!live,
       };
     });
-    // Sort: online first, then by name
     known.sort((a, b) => (b.online - a.online) || a.name.localeCompare(b.name));
     UI.renderPeerTiles(known, onSelectPeer, onRemovePeer);
   }
 
   function onSelectPeer(peerId) {
-    openTransferScreen(peerId);
+    openChatScreen(peerId);
   }
 
   function onRemovePeer(peerId) {
     PeerStorage.removePeer(peerId);
+    PeerStorage.clearChatHistory(peerId);
     peerManager.disconnect(peerId);
     refreshTiles();
   }
 
-  function openTransferScreen(peerId) {
+  function openChatScreen(peerId) {
     currentPeerId = peerId;
     const stored = PeerStorage.getKnownPeers().find(p => p.peerId === peerId);
     const live = onlinePeers.get(peerId);
@@ -237,8 +305,65 @@
       online: !!live,
     };
     selectedFiles = [];
+    folderName = null;
     receiveSession = null;
-    UI.showTransferScreen(info);
+    pendingFileOffer = null;
+
+    const history = PeerStorage.getChatHistory(peerId);
+    UI.showChatScreen(info, history, myId);
+  }
+
+  // ── Send text message ──────────────────────────────────────────────────
+  function sendTextMessage() {
+    const text = UI.el.chatInput.value.trim();
+    if (!text || !currentPeerId) return;
+
+    const live = onlinePeers.get(currentPeerId);
+    if (!live) {
+      UI.toast('Peer is offline', 'error');
+      return;
+    }
+
+    const msgId = _uid();
+    signaling.sendTextMessage(currentPeerId, text, msgId);
+
+    const chatMsg = {
+      id: msgId,
+      type: 'text',
+      from: myId,
+      text: text,
+      timestamp: Date.now(),
+    };
+    PeerStorage.addChatMessage(currentPeerId, chatMsg);
+    UI.appendChatMessage(chatMsg, true);
+
+    UI.el.chatInput.value = '';
+    UI.el.chatInput.focus();
+  }
+
+  // ── Send files ─────────────────────────────────────────────────────────
+  function initiateFileSend(files, senderFolderName) {
+    if (!files.length || !currentPeerId) return;
+    const live = onlinePeers.get(currentPeerId);
+    if (!live) {
+      UI.toast('Peer is offline. Wait until they come online.', 'error');
+      return;
+    }
+
+    selectedFiles = files;
+    folderName = senderFolderName || null;
+
+    // Send file offer via signaling
+    const fileMeta = files.map(f => ({
+      name: f.name,
+      size: f.size,
+      type: f.type,
+      relativePath: f.webkitRelativePath || '',
+    }));
+    signaling.sendFileOffer(currentPeerId, fileMeta, folderName);
+    UI.showProgress('Waiting for approval…');
+
+    PeerStorage.upsertPeer(currentPeerId, live.name);
   }
 
   // ── UI event binding ──────────────────────────────────────────────────
@@ -268,61 +393,165 @@
   UI.el.btnBack.addEventListener('click', () => {
     currentPeerId = null;
     selectedFiles = [];
+    folderName = null;
     UI.showStartScreen();
     refreshTiles();
   });
 
-  // ─── File selection ────────────────────────────────────────────────────
-  UI.el.btnBrowse.addEventListener('click', (e) => { e.stopPropagation(); UI.el.fileInput.click(); });
-  UI.el.dropZone.addEventListener('click', () => UI.el.fileInput.click());
+  // ─── Text message ─────────────────────────────────────────────────────
+  UI.el.btnSendMsg.addEventListener('click', sendTextMessage);
+  UI.el.chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendTextMessage();
+    }
+  });
+
+  // ─── File attachment ───────────────────────────────────────────────────
+  UI.el.btnAttach.addEventListener('click', () => UI.el.fileInput.click());
+  UI.el.btnFolder.addEventListener('click', () => UI.el.folderInput.click());
 
   UI.el.fileInput.addEventListener('change', () => {
-    selectedFiles = Array.from(UI.el.fileInput.files);
-    UI.showSelectedFiles(selectedFiles);
-    UI.el.fileInput.value = ''; // allow re-select
+    const files = Array.from(UI.el.fileInput.files);
+    if (files.length) initiateFileSend(files, null);
+    UI.el.fileInput.value = '';
   });
 
-  // Drag & drop
-  UI.el.dropZone.addEventListener('dragover', (e) => { e.preventDefault(); UI.el.dropZone.classList.add('drag-over'); });
-  UI.el.dropZone.addEventListener('dragleave', () => { UI.el.dropZone.classList.remove('drag-over'); });
-  UI.el.dropZone.addEventListener('drop', (e) => {
+  UI.el.folderInput.addEventListener('change', () => {
+    const files = Array.from(UI.el.folderInput.files);
+    if (!files.length) return;
+    // Extract folder name from the first file's webkitRelativePath
+    const firstPath = files[0].webkitRelativePath || '';
+    const fName = firstPath.split('/')[0] || 'Folder';
+    initiateFileSend(files, fName);
+    UI.el.folderInput.value = '';
+  });
+
+  // ─── Drag & drop on chat ──────────────────────────────────────────────
+  let dragCounter = 0;
+  const chatArea = UI.el.chatInputArea;
+
+  document.addEventListener('dragenter', (e) => {
+    if (!currentPeerId) return;
     e.preventDefault();
-    UI.el.dropZone.classList.remove('drag-over');
-    selectedFiles = Array.from(e.dataTransfer.files);
-    UI.showSelectedFiles(selectedFiles);
+    dragCounter++;
+    if (dragCounter === 1) UI.el.chatDropOverlay.hidden = false;
   });
 
-  // Remove individual file
-  UI.el.selectedFilesCt.addEventListener('click', (e) => {
-    const btn = e.target.closest('.sf-remove');
-    if (!btn) return;
-    const idx = parseInt(btn.dataset.idx, 10);
-    selectedFiles.splice(idx, 1);
-    UI.showSelectedFiles(selectedFiles);
-  });
-
-  // Send button
-  UI.el.btnSend.addEventListener('click', () => {
-    if (!currentPeerId || !selectedFiles.length) return;
-    const live = onlinePeers.get(currentPeerId);
-    if (!live) {
-      UI.toast('Peer is offline. Wait until they come online.', 'error');
-      return;
+  document.addEventListener('dragleave', (e) => {
+    if (!currentPeerId) return;
+    dragCounter--;
+    if (dragCounter <= 0) {
+      dragCounter = 0;
+      UI.el.chatDropOverlay.hidden = true;
     }
-    // Send file offer via signaling for permission
-    const fileMeta = selectedFiles.map(f => ({ name: f.name, size: f.size, type: f.type }));
-    signaling.sendFileOffer(currentPeerId, fileMeta);
-    UI.showProgress('Waiting for approval…');
+  });
 
-    // Persist the peer
-    PeerStorage.upsertPeer(currentPeerId, live.name);
+  document.addEventListener('dragover', (e) => {
+    if (!currentPeerId) return;
+    e.preventDefault();
+  });
+
+  document.addEventListener('drop', (e) => {
+    if (!currentPeerId) return;
+    e.preventDefault();
+    dragCounter = 0;
+    UI.el.chatDropOverlay.hidden = true;
+
+    const items = e.dataTransfer.items;
+    if (items && items.length > 0) {
+      // Check for folder via webkitGetAsEntry
+      const entries = [];
+      let hasFolder = false;
+      for (let i = 0; i < items.length; i++) {
+        const entry = items[i].webkitGetAsEntry && items[i].webkitGetAsEntry();
+        if (entry) {
+          entries.push(entry);
+          if (entry.isDirectory) hasFolder = true;
+        }
+      }
+
+      if (hasFolder) {
+        // Read folder recursively
+        _readEntriesRecursive(entries).then(files => {
+          if (files.length) {
+            const fName = entries[0].name || 'Folder';
+            initiateFileSend(files, fName);
+          }
+        });
+        return;
+      }
+    }
+
+    // Regular file drop
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length) initiateFileSend(files, null);
+  });
+
+  /**
+   * Recursively read files from FileSystemEntry objects.
+   * Returns a flat array of File objects with webkitRelativePath emulated.
+   */
+  async function _readEntriesRecursive(entries) {
+    const files = [];
+
+    async function processEntry(entry, path) {
+      if (entry.isFile) {
+        const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+        // Create a new File with the relative path set
+        const newFile = new File([file], file.name, { type: file.type, lastModified: file.lastModified });
+        // We can't set webkitRelativePath, so store it as a custom property
+        Object.defineProperty(newFile, 'webkitRelativePath', {
+          value: path + file.name,
+          writable: false,
+        });
+        files.push(newFile);
+      } else if (entry.isDirectory) {
+        const dirReader = entry.createReader();
+        const subEntries = await new Promise((resolve, reject) => {
+          const allEntries = [];
+          const readBatch = () => {
+            dirReader.readEntries(batch => {
+              if (batch.length === 0) {
+                resolve(allEntries);
+              } else {
+                allEntries.push(...batch);
+                readBatch();
+              }
+            }, reject);
+          };
+          readBatch();
+        });
+        for (const sub of subEntries) {
+          await processEntry(sub, path + entry.name + '/');
+        }
+      }
+    }
+
+    for (const entry of entries) {
+      await processEntry(entry, '');
+    }
+    return files;
+  }
+
+  // ─── Clear chat ────────────────────────────────────────────────────────
+  UI.el.btnClearChat.addEventListener('click', () => {
+    if (!currentPeerId) return;
+    PeerStorage.clearChatHistory(currentPeerId);
+    // Re-render empty chat
+    const stored = PeerStorage.getKnownPeers().find(p => p.peerId === currentPeerId);
+    const live = onlinePeers.get(currentPeerId);
+    UI.showChatScreen({
+      peerId: currentPeerId,
+      name: (live && live.name) || (stored && stored.name) || 'Unknown',
+      online: !!live,
+    }, [], myId);
   });
 
   // ── Boot ───────────────────────────────────────────────────────────────
   signaling.connect(myId, myName);
   refreshTiles();
 
-  // Clean up URL params after processing ?connect=
   if (connectTo) {
     const cleanUrl = location.pathname;
     history.replaceState(null, '', cleanUrl);
